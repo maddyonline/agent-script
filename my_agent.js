@@ -1,4 +1,46 @@
+import process from 'process';
 import { createMachine, interpret, assign } from 'xstate';
+import { config } from 'dotenv';
+import fetch from 'node-fetch';
+
+config();
+
+const OPENAI_API_HOST = 'https://api.openai.com';
+
+
+
+async function fetchAnswerOpenAI(messages) {
+    const body = JSON.stringify({
+        model: 'gpt-4',
+        messages: messages,
+        temperature: 1,
+        stream: false,
+    })
+    // console.log("calling OpenAI with", body)
+
+    const answerRes = await fetch(`${OPENAI_API_HOST}/v1/chat/completions`, {
+        headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        },
+        method: 'POST',
+        body: body,
+    });
+    if (answerRes.status !== 200) {
+        console.log(`${answerRes.status}: sent this body: '${body}'`);
+        return { content: "{}", role: "assistant" };
+    }
+    // console.log(answerRes)
+    try {
+        const answerData = await answerRes.json();
+        const extractedAnswer = answerData.choices && answerData.choices[0].message;
+        return extractedAnswer; // outputs {content: "", role: ""}
+    } catch (error) {
+        console.error(error)
+    }
+
+}
+
 
 const systemPrompt = `
 You are an agent named "amy" with access to tools. Also because your interface 
@@ -52,7 +94,7 @@ const initialContext = {
 };
 
 const mockOpenAIAPI = async (messages) => {
-    const userMessage = messages[messages.length - 1].content;
+    const userMessage = JSON.parse(messages[messages.length - 1].content);
 
     if (userMessage.message_type === 'user_message' && userMessage.message.includes('schedule')) {
         const response = {
@@ -62,22 +104,19 @@ const mockOpenAIAPI = async (messages) => {
             to: 'tool'
         };
 
-        return { role: 'assistant', content: response };
+        return { role: 'assistant', content: JSON.stringify(response) };
     } else if (userMessage.message_type === 'http_response') {
-        const apiResponse = JSON.parse(userMessage.message);
-        const eventsMessage = apiResponse.events.map(event => {
-            const participants = event.participants.join(', ');
-            return `${event.name} with${participants ? ' ' + participants : ''}`;
-        }).join(' and ');
+        const numEvents = userMessage.message.length;
+
 
         const response = {
-            message: `You have ${apiResponse.events.length} events: ${eventsMessage}`,
+            message: `You have ${numEvents} events scheduled`,
             message_type: 'user_response',
             from: 'assistant',
             to: 'user'
         };
 
-        return { role: 'assistant', content: response };
+        return { role: 'assistant', content: JSON.stringify(response) };
     } else {
         const response = {
             message: 'ok',
@@ -86,7 +125,7 @@ const mockOpenAIAPI = async (messages) => {
             to: 'system'
         };
 
-        return { role: 'assistant', content: response };
+        return { role: 'assistant', content: JSON.stringify(response) };
     }
 };
 
@@ -103,18 +142,15 @@ const mockCalendarAPI = async () => {
         }
     ];
 
-    const message = {
-        events: events
-    };
 
     const response = {
-        message: JSON.stringify(message),
+        message: events,
         message_type: 'http_response',
         from: 'tool',
         to: 'assistant'
     };
 
-    return { status: 'success', message: response };
+    return { status: 'success', message: JSON.stringify(response) };
 };
 
 
@@ -172,7 +208,7 @@ const myAgentMachine = createMachine({
             messages: (ctx, evt) => [...ctx.messages, evt.data]
         }),
         addAPIResponse: assign({
-            messages: (ctx, evt) => [...ctx.messages, { role: 'api', content: evt.data.message }]
+            messages: (ctx, evt) => [...ctx.messages, { role: 'user', content: evt.data.message }]
         }),
         sendOpenAIResponseBackToUser: (context) => {
             console.log('to user, OpenAI Response:', context.messages[context.messages.length - 1].content);
@@ -180,12 +216,12 @@ const myAgentMachine = createMachine({
     },
     guards: {
         shouldTriggerAPI: (context) => {
-            const openAIResponse = context.messages[context.messages.length - 1].content;
+            const openAIResponse = JSON.parse(context.messages[context.messages.length - 1].content);
             return openAIResponse.message_type === 'request_action';
         }
     },
     services: {
-        fetchAnswer: (context) => mockOpenAIAPI(context.messages),
+        fetchAnswer: (context) => process.argv[2] === 'actual' ? fetchAnswerOpenAI(context.messages) : mockOpenAIAPI(context.messages),
         mockCalendarAPI: () => mockCalendarAPI()
     }
 });
@@ -215,4 +251,4 @@ const myAgentService = interpret(myAgentMachine)
     })
     .start();
 
-setTimeout(() => myAgentService.send({ type: 'USER_MESSAGE', content: { message: 'What is my schedule for tomorrow?', message_type: 'user_message', from: 'user', to: 'assistant' } }), 1000);
+setTimeout(() => myAgentService.send({ type: 'USER_MESSAGE', content: JSON.stringify({ message: 'What is my schedule for tomorrow?', message_type: 'user_message', from: 'user', to: 'assistant' }) }), 1000);

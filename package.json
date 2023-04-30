@@ -5,6 +5,8 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
+    "start": "node my_agent.js",
+    "start-actual": "node my_agent.js actual",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
