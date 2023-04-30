@@ -7,86 +7,43 @@ strict formatting guidelines in all your responses below. In particular,
 you always respond in valid JSON which can be parsed by JSON parser.
 
 Your inputs will also be valid JSON. This is a system prompt, so for
-any default reply (like reply to this message), just output: {"message": "ok"}
+any default reply (like reply to this message), just output: {"message": "ok", "message_type": "default", "from": "assistant", "to": "system"}
 
 
 Input messages will look like this:
 
 {
-  "from": "user1", "user_type": "user", "message": 
-   "what is my schedule for tomorrow?", "message_type": "user_message"
+    "message": "user1:what is my schedule for tomorrow?", "message_type": "user_message", "from": "user", "to": "assistant"
 }
 
-In solving these tasks, you may want to do some self-talk. So an appropriate
-response here is as follows.
+A natural follow through here would be to request an action via a "request_action" message.
+This will trigger an HTTP response. 
 
 {
-  "from": "amy",
-  "user_type": "agent",
-  "message": "I need to use [http-tool] to fulfill this request",
-  "message_type": "self_talk"
+  "message": "http://user-calendar/user1?day=tomorrow",
+  "message_type": "request_action",
+  "from": "assistant",
+  "to": "tool"
 }
 
-A self-talk message will be sent to you again which gives you
-the opportunity to extend this conversation to fulfill the task.
-
-So messages, so far sent to you might look like this:
-
-[
-  {
-   "from": "user1", "user_type": "user", "message": 
-   "what is my schedule for tomorrow?", "message_type": "user_message"
-  },
-  {
-    "from": "amy",
-    "user_type": "agent",
-    "message": "I need to use [http-tool] to fulfill this request",
-    "message_type": "self_talk"
-  }
-]
-
-At this point, you can continue the converstion. A natural follow through
-here would be another self-talk.
+This results in an API call and you will get a response back as the next message.
 
 {
-  "from": "amy",
-  "user_type": "agent",
-  "message": "Make this GET request: http://user-calendar/user1?day=tomorrow",
-  "message_type": "action_requested"
-}
-
-Once again, this self-talk will be relayed back to you (as well as to the
-[http-tool]). Since at this point, you are waiting http-tool response,
-you may momentarily pause your self-talk. Hopefully 
-the next message you receive is from [http-tool].
-
-{
-  "from": "http-tool",
-  "user_type": "tool",
-  "message": "events: ["2am muks meeting", "3am lunch tomorrow"]",
-  "message_type": "http_response"
+  "message": "{"events": [{"name": "2am meeting", "participants": ["muks"]}, {"name": "5am yoga", "participants": []}]}",
+  "message_type": "http_response",
+  "from": "tool",
+  "to": "assistant"
 }
 
 Once you receive this message, the final respose might look like this:
 
 {
-  "from": "amy",
-  "user_type": "agent",
-  "message": "You have 1 meeting at 2 am with muks and another meeting at 3 am for lunch",
-  "message_type": "user_response"
+  "message": "You have 1 meeting at 2 am with muks and another meeting at 5 am to do yoga",
+  "message_type": "user_response",
+  "from": "assistant",
+  "to": "user"
 }
-
-This user-response message will also be relayed back to you. At this point,
-you may optionally end with a self-talk that task is accomplished.
-  {
-    "from": "amy",
-    "user_type": "agent",
-    "message": "task finished",
-    "message_type": "self_talk"
-  }
-
-When this self-talk is relayed back, no need to reply. (or reply with 
-default {"message": "ok"})`;
+`;
 
 const initialContext = {
     messages: [
@@ -97,17 +54,69 @@ const initialContext = {
 const mockOpenAIAPI = async (messages) => {
     const userMessage = messages[messages.length - 1].content;
 
-    if (userMessage.toLowerCase().includes('trigger')) {
-        return { role: 'assistant', content: 'TRIGGER API_CALL' };
+    if (userMessage.message_type === 'user_message' && userMessage.message.includes('schedule')) {
+        const response = {
+            message: 'http://user-calendar/user1?day=tomorrow',
+            message_type: 'request_action',
+            from: 'assistant',
+            to: 'tool'
+        };
+
+        return { role: 'assistant', content: response };
+    } else if (userMessage.message_type === 'http_response') {
+        const apiResponse = JSON.parse(userMessage.message);
+        const eventsMessage = apiResponse.events.map(event => {
+            const participants = event.participants.join(', ');
+            return `${event.name} with${participants ? ' ' + participants : ''}`;
+        }).join(' and ');
+
+        const response = {
+            message: `You have ${apiResponse.events.length} events: ${eventsMessage}`,
+            message_type: 'user_response',
+            from: 'assistant',
+            to: 'user'
+        };
+
+        return { role: 'assistant', content: response };
     } else {
-        return { role: 'assistant', content: `{"message": "ok"}` };
+        const response = {
+            message: 'ok',
+            message_type: 'default',
+            from: 'assistant',
+            to: 'system'
+        };
+
+        return { role: 'assistant', content: response };
     }
 };
 
 const mockCalendarAPI = async () => {
-    console.log("calling Calendar API")
-    return { status: 'success', message: `events: ['2am muks meeting', '3am lunch tomorrow']` };
+    console.log("calling Calendar API");
+    const events = [
+        {
+            name: "2am meeting",
+            participants: ["muks"]
+        },
+        {
+            name: "5am yoga",
+            participants: []
+        }
+    ];
+
+    const message = {
+        events: events
+    };
+
+    const response = {
+        message: JSON.stringify(message),
+        message_type: 'http_response',
+        from: 'tool',
+        to: 'assistant'
+    };
+
+    return { status: 'success', message: response };
 };
+
 
 const myAgentMachine = createMachine({
     predictableActionArguments: true,
@@ -172,7 +181,7 @@ const myAgentMachine = createMachine({
     guards: {
         shouldTriggerAPI: (context) => {
             const openAIResponse = context.messages[context.messages.length - 1].content;
-            return openAIResponse.includes('TRIGGER');
+            return openAIResponse.message_type === 'request_action';
         }
     },
     services: {
@@ -206,4 +215,4 @@ const myAgentService = interpret(myAgentMachine)
     })
     .start();
 
-setTimeout(() => myAgentService.send({ type: 'USER_MESSAGE', content: 'TRIGGER' }), 1000);
+setTimeout(() => myAgentService.send({ type: 'USER_MESSAGE', content: { message: 'What is my schedule for tomorrow?', message_type: 'user_message', from: 'user', to: 'assistant' } }), 1000);
